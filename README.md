@@ -56,3 +56,35 @@ Concept3D is an intelligent system that bridges abstract text concepts with spat
 
 ---
 Created with ❤️ for the 3D Generation Community.
+
+
+
+Use these on macOS (open 2 terminal tabs/windows):
+
+1. Backend (Terminal 1)
+
+cd "/Users/ishniaizhar/Documents/mnnit project/3d-models/backend"
+python3 -m venv venv
+source venv/bin/activate
+pip3 install -r requirements.txt
+
+Then create your .env file in backend and add keys (Gemini, Groq, etc.), then run:
+
+python3 main.py
+
+2. Frontend (Terminal 2)
+
+cd "/Users/ishniaizhar/Documents/mnnit project/3d-models/frontend"
+npm install
+npm run dev
+
+3. Open app
+
+Frontend: http://localhost:5173  
+Backend (default FastAPI): http://localhost:8000
+
+Mac-specific note:
+The activation command on macOS is:
+source venv/bin/activate
+
+(Windows uses .\venv\Scripts\activate, so you can ignore that line in the README.)

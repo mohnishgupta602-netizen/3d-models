@@ -6,10 +6,11 @@ load_dotenv()
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from groq import Groq
 from intent import IntentAnalyzer
-from search import ModelSearchEngine
+from search import ModelSearchEngine, CACHE_VERSION
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
@@ -23,6 +24,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+models_dir = os.path.join(os.path.dirname(__file__), "models")
+os.makedirs(models_dir, exist_ok=True)
+app.mount("/models", StaticFiles(directory=models_dir), name="models")
 
 intent_analyzer = IntentAnalyzer()
 search_engine = ModelSearchEngine()
@@ -73,6 +78,10 @@ class ChatRequest(BaseModel):
     message: str
     model_context: Optional[str] = None
 
+
+class CacheClearRequest(BaseModel):
+    query: Optional[str] = None
+
 @app.post("/api/chat")
 async def chat_with_ai(request: ChatRequest):
     """
@@ -93,6 +102,26 @@ async def chat_with_ai(request: ChatRequest):
             model="llama-3.3-70b-versatile",
         )
         return {"status": "success", "message": completion.choices[0].message.content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/cache/clear")
+async def clear_cache(request: CacheClearRequest):
+    """
+    Clears cached search entries.
+    - If query is provided, clears only that normalized query key.
+    - If omitted, clears all cached entries.
+    """
+    try:
+        if request.query:
+            normalized = search_engine._normalize_query(request.query)
+            cache_key = f"{CACHE_VERSION}::{normalized}"
+            deleted = search_engine.cache.clear_cache(cache_key)
+            return {"status": "success", "cleared": deleted, "scope": "single", "query": normalized}
+
+        deleted = search_engine.cache.clear_cache()
+        return {"status": "success", "cleared": deleted, "scope": "all"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

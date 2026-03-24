@@ -33,7 +33,7 @@ function App() {
         })
       ]);
 
-      const [intentJson, searchJson] = await Promise.all([
+      const [_intentJson, searchJson] = await Promise.all([
         intentRes.json(),
         searchRes.json()
       ]);

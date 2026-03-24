@@ -32,6 +32,34 @@ export default function ModelSelection({ results, currentModel, onSelect }) {
               )}
             </div>
             <span className="text-xs opacity-80 truncate line-clamp-1 italic">{res.title || 'Procedural Model'}</span>
+
+            {Array.isArray(res.model_labels) && res.model_labels.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {res.model_labels.slice(0, 4).map((label) => (
+                  <span
+                    key={`${res.uid}-${label.key}`}
+                    className="text-[10px] px-1.5 py-0.5 rounded bg-sky-900/30 border border-sky-700/60 text-sky-200"
+                  >
+                    {label.key}: {label.value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {res.similarity_metadata?.high_similarity && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {res.similarity_metadata.labels
+                  .filter((label) => label.key !== 'reason')
+                  .map((label) => (
+                    <span
+                      key={`${res.uid}-${label.key}`}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/35 border border-emerald-700/60 text-emerald-200"
+                    >
+                      {label.key}: {label.value}
+                    </span>
+                  ))}
+              </div>
+            )}
           </button>
         ))}
       </div>

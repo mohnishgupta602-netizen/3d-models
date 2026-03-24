@@ -95,10 +95,12 @@ export default function AIChatbot() {
             placeholder="Ask about this model..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            disabled={isLoading}
             className="w-full bg-slate-900/80 border border-slate-700 rounded-xl py-3 pl-4 pr-12 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
           />
           <button
             type="submit"
+            disabled={isLoading || !input.trim()}
             className="absolute right-2 top-1.5 bottom-1.5 w-9 flex items-center justify-center bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors"
           >
             <Send size={16} />
