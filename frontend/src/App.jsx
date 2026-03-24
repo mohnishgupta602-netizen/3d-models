@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import SearchBar from './components/SearchBar';
 import ThreeCanvas from './components/ThreeCanvas';
 import ModelSelection from './components/ModelSelection';
+import ModelDetailModal from './components/ModelDetailModal';
 import AIChatbot from './components/AIChatbot';
 import ReviewPanel from './components/ReviewPanel';
+import { generateNarration, truncateNarrationToTime, calculateNarrationDuration } from './utils/narrationGenerator';
 import { Layers, Square, Volume2 } from 'lucide-react';
 
 function App() {
@@ -14,6 +16,7 @@ function App() {
   const [resultsList, setResultsList] = useState([]);
   const [activeQuery, setActiveQuery] = useState('');
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [detailedModel, setDetailedModel] = useState(null);
   const [rightPanelTab, setRightPanelTab] = useState('reviews');
 
   useEffect(() => {
@@ -27,14 +30,78 @@ function App() {
   const narrationText = useMemo(() => {
     if (!modelData) return '';
 
-    const overview = (modelData.ai_overview || '').trim();
-    if (overview) {
-      return overview;
+    const topic = activeQuery || modelData.title || 'this concept';
+    
+    // Generate comprehensive narration
+    let narration = generateNarration(topic, modelData, activeQuery);
+    
+    // Ensure it fits within 90-120 seconds constraint
+    const duration = calculateNarrationDuration(narration);
+    
+    if (duration > 120) {
+      // Truncate to fit within time constraint
+      narration = truncateNarrationToTime(narration, 90, 120);
     }
-
-    const topic = (activeQuery || modelData.title || 'this concept').trim();
-    return `You searched for ${topic}. This is a 3D representation of ${topic} to help you understand the concept in a simple visual way.`;
+    
+    return narration;
   }, [modelData, activeQuery]);
+
+  const narrationDuration = useMemo(() => {
+    return calculateNarrationDuration(narrationText);
+  }, [narrationText]);
+
+  const formatDuration = (seconds) => {
+    if (seconds < 60) return `${seconds}s`;
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const handleReviewSubmitted = async () => {
+    // Re-fetch review summaries for all models and resort
+    if (resultsList.length === 0) return;
+
+    try {
+      const reviewSummaries = await Promise.all(
+        resultsList.map(async (model) => {
+          try {
+            const res = await fetch(`http://127.0.0.1:8000/api/reviews/${encodeURIComponent(model.uid)}/summary`);
+            if (res.ok) {
+              const summaryData = await res.json();
+              return { uid: model.uid, summary: summaryData.data };
+            }
+          } catch (err) {
+            console.error(`Failed to fetch reviews for ${model.uid}:`, err);
+          }
+          return { uid: model.uid, summary: null };
+        })
+      );
+
+      // Update results with new review data and resort
+      const updatedResults = resultsList.map((model) => {
+        const reviewData = reviewSummaries.find((r) => r.uid === model.uid);
+        return {
+          ...model,
+          review_summary: reviewData?.summary || null,
+          average_rating: reviewData?.summary?.avg_rating || 0,
+        };
+      }).sort((a, b) => {
+        // Sort by average rating descending (highest first)
+        return (b.average_rating || 0) - (a.average_rating || 0);
+      });
+
+      setResultsList(updatedResults);
+      // Keep current model in view (don't change it just because order changed)
+      if (modelData) {
+        const updatedCurrentModel = updatedResults.find((m) => m.uid === modelData.uid);
+        if (updatedCurrentModel) {
+          setModelData(updatedCurrentModel);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to re-sort models after review:', err);
+    }
+  };
 
   const stopNarration = () => {
     if ('speechSynthesis' in window) {
@@ -94,7 +161,37 @@ function App() {
       ]);
       
       if (searchJson.status === 'success' || searchJson.status === 'fallback') {
-        const data = Array.isArray(searchJson.data) ? searchJson.data : [searchJson.data];
+        let data = Array.isArray(searchJson.data) ? searchJson.data : [searchJson.data];
+        
+        // Fetch review summaries for all models
+        const reviewSummaries = await Promise.all(
+          data.map(async (model) => {
+            try {
+              const res = await fetch(`http://127.0.0.1:8000/api/reviews/${encodeURIComponent(model.uid)}/summary`);
+              if (res.ok) {
+                const summaryData = await res.json();
+                return { uid: model.uid, summary: summaryData.data };
+              }
+            } catch (err) {
+              console.error(`Failed to fetch reviews for ${model.uid}:`, err);
+            }
+            return { uid: model.uid, summary: null };
+          })
+        );
+
+        // Add review summary to each model and sort by average rating
+        data = data.map((model) => {
+          const reviewData = reviewSummaries.find((r) => r.uid === model.uid);
+          return {
+            ...model,
+            review_summary: reviewData?.summary || null,
+            average_rating: reviewData?.summary?.avg_rating || 0,
+          };
+        }).sort((a, b) => {
+          // Sort by average rating descending (highest first)
+          return (b.average_rating || 0) - (a.average_rating || 0);
+        });
+
         setResultsList(data);
         setModelData(data[0]);
       } else {
@@ -159,7 +256,10 @@ function App() {
                 onSelect={(m) => {
                   stopNarration();
                   setModelData(m);
-                }} 
+                }}
+                onShowDetails={(m) => {
+                  setDetailedModel(m);
+                }}
               />
             </div>
 
@@ -177,9 +277,16 @@ function App() {
             {/* Right Sidebar: Reviews & Chat */}
             <div className="lg:col-span-1 h-full overflow-hidden flex flex-col gap-4">
               <div className="bg-slate-900/50 border border-slate-800/50 rounded-2xl p-4 shadow-xl backdrop-blur-sm">
-                <div className="flex items-center gap-2 mb-3 text-slate-100 font-semibold">
-                  <Volume2 size={18} className="text-blue-400" />
-                  <h3 className="text-sm">English Audio Description</h3>
+                <div className="flex items-center justify-between mb-3 text-slate-100 font-semibold">
+                  <div className="flex items-center gap-2">
+                    <Volume2 size={18} className="text-blue-400" />
+                    <h3 className="text-sm">English Audio Description</h3>
+                  </div>
+                  {narrationText && (
+                    <span className="text-xs text-slate-400 bg-slate-800/50 px-2 py-1 rounded">
+                      {formatDuration(narrationDuration)}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -239,7 +346,11 @@ function App() {
                   className="absolute inset-0 transition-opacity duration-300 ease-in-out"
                   style={{ opacity: rightPanelTab === 'reviews' ? 1 : 0, pointerEvents: rightPanelTab === 'reviews' ? 'auto' : 'none' }}
                 >
-                  <ReviewPanel modelId={modelData?.uid} modelTitle={modelData?.title} />
+                  <ReviewPanel 
+                    modelId={modelData?.uid} 
+                    modelTitle={modelData?.title}
+                    onReviewSubmitted={handleReviewSubmitted}
+                  />
                 </div>
                 <div
                   className="absolute inset-0 transition-opacity duration-300 ease-in-out"
@@ -252,6 +363,12 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Model Detail Modal */}
+      <ModelDetailModal 
+        model={detailedModel}
+        onClose={() => setDetailedModel(null)}
+      />
     </div>
   );
 }

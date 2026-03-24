@@ -19,25 +19,133 @@ function getNumeric(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function resolveAnchorPosition(positionObj, bounds, idx, total) {
+  const rawX = getNumeric(positionObj?.x, NaN);
+  const rawY = getNumeric(positionObj?.y, NaN);
+  const rawZ = getNumeric(positionObj?.z, NaN);
+
+  const hasAllCoords = Number.isFinite(rawX) && Number.isFinite(rawY) && Number.isFinite(rawZ);
+
+  const center = [
+    bounds.min.x + bounds.size.x * 0.5,
+    bounds.min.y + bounds.size.y * 0.5,
+    bounds.min.z + bounds.size.z * 0.5,
+  ];
+
+  // Fallback ring if metadata is missing.
+  if (!hasAllCoords) {
+    const angle = (idx / Math.max(total, 1)) * Math.PI * 2;
+    return [
+      center[0] + Math.cos(angle) * bounds.size.x * 0.25,
+      center[1] + (idx % 2 === 0 ? 1 : -1) * bounds.size.y * 0.08,
+      center[2] + Math.sin(angle) * bounds.size.z * 0.25,
+    ];
+  }
+
+  // Case 1: Semantic range [0, 1].
+  if (rawX >= 0 && rawX <= 1 && rawY >= 0 && rawY <= 1 && rawZ >= 0 && rawZ <= 1) {
+    return [
+      bounds.min.x + rawX * bounds.size.x,
+      bounds.min.y + rawY * bounds.size.y,
+      bounds.min.z + rawZ * bounds.size.z,
+    ];
+  }
+
+  // Case 2: Semantic range [-0.5, 0.5] or [-1, 1]-like normalized values.
+  if (Math.abs(rawX) <= 0.55 && Math.abs(rawY) <= 0.55 && Math.abs(rawZ) <= 0.55) {
+    return [
+      bounds.min.x + (rawX + 0.5) * bounds.size.x,
+      bounds.min.y + (rawY + 0.5) * bounds.size.y,
+      bounds.min.z + (rawZ + 0.5) * bounds.size.z,
+    ];
+  }
+
+  // Case 3: Semantic range [-1, 1].
+  if (Math.abs(rawX) <= 1.25 && Math.abs(rawY) <= 1.25 && Math.abs(rawZ) <= 1.25) {
+    return [
+      bounds.min.x + ((rawX + 1) * 0.5) * bounds.size.x,
+      bounds.min.y + ((rawY + 1) * 0.5) * bounds.size.y,
+      bounds.min.z + ((rawZ + 1) * 0.5) * bounds.size.z,
+    ];
+  }
+
+  // Case 4: Already world coordinates. Clamp to avoid far-away labels.
+  return [
+    clamp(rawX, bounds.min.x, bounds.max.x),
+    clamp(rawY, bounds.min.y, bounds.max.y),
+    clamp(rawZ, bounds.min.z, bounds.max.z),
+  ];
+}
+
+function buildLabelPosition(anchor, bounds, idx, total) {
+  const center = [
+    bounds.min.x + bounds.size.x * 0.5,
+    bounds.min.y + bounds.size.y * 0.5,
+    bounds.min.z + bounds.size.z * 0.5,
+  ];
+
+  // Push labels away from model center to reduce overlap.
+  let dirX = anchor[0] - center[0];
+  let dirZ = anchor[2] - center[2];
+  const planarLen = Math.hypot(dirX, dirZ);
+
+  if (planarLen < 1e-4) {
+    const angle = (idx / Math.max(total, 1)) * Math.PI * 2;
+    dirX = Math.cos(angle);
+    dirZ = Math.sin(angle);
+  } else {
+    dirX /= planarLen;
+    dirZ /= planarLen;
+  }
+
+  const radialOffset = clamp(Math.max(bounds.size.x, bounds.size.z) * 0.04, 0.02, 0.2);
+  const verticalOffset = clamp(bounds.size.y * 0.05 + (idx % 3) * (bounds.size.y * 0.012), 0.02, 0.16);
+
+  return [
+    anchor[0] + dirX * radialOffset,
+    clamp(anchor[1] + verticalOffset, bounds.min.y - bounds.size.y * 0.1, bounds.max.y + bounds.size.y * 0.45),
+    anchor[2] + dirZ * radialOffset,
+  ];
+}
+
 
 function GLTFModelWithLabels({ url, parts, hoveredPart, onHoverStart, onHoverEnd }) {
-  const { scene } = useGLTF(url);
+  const gltf = useGLTF(url);
+  const scene = gltf?.scene;
+
+  if (!scene) {
+    console.warn('Scene not available from GLTF:', url);
+    return null;
+  }
 
   const bounds = useMemo(() => {
-    const box = new THREE.Box3().setFromObject(scene);
-    const min = box.min.clone();
-    const max = box.max.clone();
-    const size = max.clone().sub(min);
+    try {
+      const box = new THREE.Box3().setFromObject(scene);
+      const min = box.min.clone();
+      const max = box.max.clone();
+      const size = max.clone().sub(min);
 
-    return {
-      min,
-      max,
-      size: {
-        x: Math.max(size.x, 1),
-        y: Math.max(size.y, 1),
-        z: Math.max(size.z, 1),
-      },
-    };
+      return {
+        min,
+        max,
+        size: {
+          x: Math.max(size.x, 1),
+          y: Math.max(size.y, 1),
+          z: Math.max(size.z, 1),
+        },
+      };
+    } catch (err) {
+      console.error('Bounds calculation error:', err);
+      return {
+        min: new THREE.Vector3(-1, -1, -1),
+        max: new THREE.Vector3(1, 1, 1),
+        size: { x: 1, y: 1, z: 1 },
+      };
+    }
   }, [scene]);
 
   return (
@@ -46,24 +154,16 @@ function GLTFModelWithLabels({ url, parts, hoveredPart, onHoverStart, onHoverEnd
       {Array.isArray(parts) && parts.length > 0 &&
         parts.slice(0, 8).map((part, idx) => {
           const positionObj = part?.position || {};
-          const nx = getNumeric(positionObj.x, 0);
-          const ny = getNumeric(positionObj.y, 0);
-          const nz = getNumeric(positionObj.z, 0);
-
-          // Map semantic normalized coordinates [-0.5, 0.5] to model bounding box
-          // Using min + (coord + 0.5) * size formula
-          const markerPos = [
-            bounds.min.x + (nx + 0.5) * bounds.size.x,
-            bounds.min.y + (ny + 0.5) * bounds.size.y,
-            bounds.min.z + (nz + 0.5) * bounds.size.z,
-          ];
+          const anchorPos = resolveAnchorPosition(positionObj, bounds, idx, parts.length);
+          const labelPos = buildLabelPosition(anchorPos, bounds, idx, parts.length);
 
           return (
             <LabelMarker
               key={`${part?.name || 'marker'}-${idx}`}
               part={part}
               index={idx}
-              markerPosition={markerPos}
+              markerPosition={anchorPos}
+              labelPosition={labelPos}
               isHovered={hoveredPart?.index === idx}
               onHoverStart={onHoverStart}
               onHoverEnd={onHoverEnd}
@@ -143,11 +243,18 @@ const ProceduralShape = ({ part, index, explodedOffset, isHovered, onHoverStart,
   );
 };
 
-const LabelMarker = ({ part, index, markerPosition, isHovered, onHoverStart, onHoverEnd }) => {
+const LabelMarker = ({ part, index, markerPosition, labelPosition, isHovered, onHoverStart, onHoverEnd }) => {
   const positionObj = part?.position || {};
   const markerPos = markerPosition || [positionObj.x || 0, (positionObj.y || 0) + 0.2, positionObj.z || 0];
-  const textPos = [0, 0.15, 0];
-  const linePoints = [markerPos, [markerPos[0] + textPos[0], markerPos[1] + textPos[1], markerPos[2] + textPos[2]]];
+  const textPos = labelPosition
+    ? [
+        labelPosition[0] - markerPos[0],
+        labelPosition[1] - markerPos[1],
+        labelPosition[2] - markerPos[2],
+      ]
+    : [0, 0.2, 0];
+  // Line points are relative to the group position
+  const linePoints = [[0, 0, 0], textPos];
 
   return (
     <group position={markerPos}>
@@ -162,7 +269,7 @@ const LabelMarker = ({ part, index, markerPosition, isHovered, onHoverStart, onH
           onHoverEnd?.();
         }}
       >
-        <sphereGeometry args={[isHovered ? 0.1 : 0.07, 24, 24]} />
+        <sphereGeometry args={[isHovered ? 0.045 : 0.032, 18, 18]} />
         <meshStandardMaterial
           color={isHovered ? '#0ea5e9' : '#06b6d4'}
           emissive={isHovered ? '#0ea5e9' : '#0891b2'}
@@ -185,14 +292,14 @@ const LabelMarker = ({ part, index, markerPosition, isHovered, onHoverStart, onH
       </lineSegments>
 
       {/* Label badge */}
-      <Html transform distanceFactor={7} position={textPos} pointerEvents="auto">
+      <Html transform sprite distanceFactor={1.4} position={textPos} pointerEvents="auto">
         <div
-          className={`rounded-lg text-white w-5 h-5 flex items-center justify-center cursor-pointer select-none text-[8px] font-semibold border transition-all duration-200 ${
+          className={`rounded text-white w-4 h-4 flex items-center justify-center cursor-pointer select-none text-[7px] font-semibold border transition-all duration-200 ${
             isHovered
-              ? 'bg-cyan-500/90 border-cyan-300/80 shadow-[0_0_12px_rgba(34,211,238,0.6)]'
-              : 'bg-cyan-600/70 border-cyan-400/50 shadow-[0_0_8px_rgba(34,211,238,0.3)]'
+              ? 'bg-cyan-500/92 border-cyan-300/85 shadow-[0_0_4px_rgba(34,211,238,0.45)]'
+              : 'bg-cyan-600/80 border-cyan-400/55 shadow-[0_0_3px_rgba(34,211,238,0.28)]'
           }`}
-          style={{ backdropFilter: 'blur(4px)', pointerEvents: 'auto' }}
+          style={{ pointerEvents: 'auto' }}
           onMouseEnter={(e) => {
             e.stopPropagation();
             onHoverStart?.(part, index);
@@ -216,6 +323,7 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
   const [optimizingLabels, setOptimizingLabels] = useState(false);
   const [optimizationError, setOptimizationError] = useState(null);
   const [optimizedParts, setOptimizedParts] = useState(null);
+  const [canvasError, setCanvasError] = useState(null);
   const canvasRef = useRef(null);
 
   const handleVisionOptimization = async () => {
@@ -287,6 +395,10 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
   }, [modelData, proceduralComponents]);
 
   const isOriginalLabeledTest = modelData?.labeling_mode === 'original-3d-test';
+  const isLabelingSection =
+    isOriginalLabeledTest ||
+    /label/i.test(modelData?.source || '') ||
+    /label/i.test(modelData?.title || '');
   const builtInAnnotationsCount = Number(modelData?.built_in_annotations_count || 0);
   const shouldUseEmbedForOriginalTest =
     isOriginalLabeledTest &&
@@ -312,18 +424,21 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
 
   return (
     <div className="w-full h-[600px] rounded-2xl overflow-hidden bg-slate-950 border-2 border-slate-700/80 shadow-2xl relative before:absolute before:inset-0 before:rounded-2xl before:shadow-[inset_0_0_20px_rgba(51,65,85,0.3)] before:pointer-events-none">
-      {fallbackImageUrl && !proceduralComponents ? (
-        <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-[#020617]">
-          <div className="relative w-full h-full flex items-center justify-center group">
-            <img 
-              src={fallbackImageUrl}
-              alt={modelData.title}
-              className="max-w-full max-h-full object-contain rounded-xl shadow-2xl transition-transform duration-500 group-hover:scale-[1.02]"
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-6 pointer-events-none">
-               <span className="text-blue-400 font-bold text-xs uppercase tracking-widest mb-2">2D Concept Visualization</span>
-               <p className="text-slate-200 text-sm italic">"No 3D model was available, so a high-fidelity 2D concept was generated."</p>
-            </div>
+      {canvasError ? (
+        <div className="w-full h-full flex items-center justify-center bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
+          <div className="text-center max-w-sm">
+            <div className="text-red-400 text-5xl mb-4">⚠️</div>
+            <h3 className="text-lg font-bold text-slate-100 mb-3">3D Rendering Error</h3>
+            <p className="text-sm text-slate-400 mb-6">{canvasError}</p>
+            <button
+              onClick={() => {
+                setCanvasError(null);
+                window.location.reload();
+              }}
+              className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              Try Again
+            </button>
           </div>
         </div>
       ) : modelData?.embed_url && (!isOriginalLabeledTest || shouldUseEmbedForOriginalTest) ? (
@@ -359,6 +474,10 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
           onCreated={({ gl }) => {
             canvasRef.current = gl.domElement;
           }}
+          onError={(error) => {
+            console.error('Canvas rendering error:', error);
+            setCanvasError('Failed to render 3D model. This model may be incompatible or unavailable.');
+          }}
         >
           <color attach="background" args={['#020617']} />
           
@@ -379,13 +498,13 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
               }>
                 <GLTFModelWithLabels
                   url={modelData.model_url}
-                  parts={isOriginalLabeledTest ? (optimizedParts || partDefinitions) : []}
+                  parts={isLabelingSection ? (optimizedParts || partDefinitions || []) : []}
                   hoveredPart={hoveredPart}
                   onHoverStart={(p, i) => setHoveredPart({ ...p, index: i })}
                   onHoverEnd={() => setHoveredPart(null)}
                 />
               </Suspense>
-            ) : proceduralComponents ? (
+            ) : proceduralComponents && proceduralComponents.length > 0 ? (
               proceduralComponents.map((part, idx) => (
                 <ProceduralShape 
                   key={`${part?.name || part?.primitive || 'part'}-${idx}`}
@@ -397,6 +516,15 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
                   onHoverEnd={() => setHoveredPart(null)}
                 />
               ))
+            ) : fallbackImageUrl ? (
+              <Suspense fallback={null}>
+                <BillboardImage url={fallbackImageUrl} />
+                <Html center position={[0, -2, 0]}>
+                  <div className="text-slate-400 font-mono text-sm tracking-widest uppercase whitespace-nowrap bg-slate-900/80 px-4 py-2 rounded-lg backdrop-blur-md">
+                    2D Concept Visualization (3D Not Available)
+                  </div>
+                </Html>
+              </Suspense>
             ) : modelData?.thumbnails?.[0]?.url ? (
               <Suspense fallback={null}>
                 <BillboardImage url={modelData.thumbnails[0].url} />
@@ -430,7 +558,7 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
         </Canvas>
       )}
 
-      {Array.isArray(partDefinitions) && partDefinitions.length > 0 && (
+      {isLabelingSection && Array.isArray(partDefinitions) && partDefinitions.length > 0 && (
         <div className="absolute top-4 left-4 z-20 max-w-sm bg-gradient-to-b from-slate-950/85 to-slate-900/80 backdrop-blur border border-slate-700/60 rounded-xl shadow-xl">
           <div className="p-3 border-b border-slate-700/40">
             <h4 className="text-xs tracking-widest uppercase text-blue-300 font-semibold">Part Definitions</h4>
@@ -439,7 +567,11 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
             {partDefinitions.slice(0, 8).map((part, idx) => (
               <li
                 key={`${part?.name || 'part'}-${idx}`}
-                className="flex items-start gap-2 p-2 rounded-lg hover:bg-slate-800/40 transition-colors group"
+                onMouseEnter={() => setHoveredPart({ ...part, index: idx })}
+                onMouseLeave={() => setHoveredPart(null)}
+                className={`flex items-start gap-2 p-2 rounded-lg transition-colors group cursor-pointer ${
+                  hoveredPart?.index === idx ? 'bg-slate-700/45' : 'hover:bg-slate-800/40'
+                }`}
               >
                 <span className="flex-shrink-0 w-5 h-5 rounded-full bg-blue-600/30 border border-blue-500/50 flex items-center justify-center text-[11px] font-semibold text-blue-300">
                   {idx + 1}
@@ -463,7 +595,7 @@ export default function ThreeCanvas({ modelData, explodedValue = 0 }) {
         </div>
       )}
 
-        {hoveredPart && (
+        {isLabelingSection && hoveredPart && (
         <div className="absolute bottom-4 left-4 z-20 max-w-sm bg-slate-950/85 backdrop-blur border border-blue-500/40 rounded-xl p-3 text-slate-100">
           <h4 className="text-sm font-semibold text-blue-300">
             {formatPartName(hoveredPart.name, hoveredPart.index)}

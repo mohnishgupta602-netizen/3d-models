@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Star, Send, AlertCircle } from 'lucide-react';
 
-export default function ReviewPanel({ modelId, modelTitle }) {
+export default function ReviewPanel({ modelId, modelTitle, onReviewSubmitted }) {
   const [reviews, setReviews] = useState([]);
   const [summary, setSummary] = useState(null);
   const [userReview, setUserReview] = useState(null);
@@ -98,6 +98,11 @@ export default function ReviewPanel({ modelId, modelTitle }) {
       const data = await res.json();
       setSuccess('Review submitted successfully!');
       setUserReview(data.review);
+
+      // Trigger callback to re-fetch and re-sort results
+      if (onReviewSubmitted) {
+        onReviewSubmitted();
+      }
 
       // Refresh reviews list
       setTimeout(() => fetchReviews(), 500);
