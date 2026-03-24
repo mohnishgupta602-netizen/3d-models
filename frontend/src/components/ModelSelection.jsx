@@ -1,4 +1,4 @@
-import { Database } from 'lucide-react';
+import { Database, Check } from 'lucide-react';
 
 export default function ModelSelection({ results, currentModel, onSelect }) {
   if (!results || results.length === 0) return null;
@@ -15,22 +15,44 @@ export default function ModelSelection({ results, currentModel, onSelect }) {
           <button
             key={index}
             onClick={() => onSelect(res)}
-            className={`text-left px-4 py-4 rounded-xl border transition-all duration-200 flex flex-col gap-1 group ${
+            className={`text-left px-4 py-3 rounded-xl border transition-all duration-300 flex flex-col gap-2 group overflow-hidden relative ${
               currentModel?.uid === res.uid 
-                ? 'bg-purple-900/30 border-purple-500/50 text-purple-100 shadow-[0_0_15px_rgba(168,85,247,0.15)]' 
-                : 'bg-slate-900/30 border-slate-800/80 text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 hover:border-slate-700'
+                ? 'bg-gradient-to-r from-purple-900/40 to-purple-800/30 border-purple-500/60 text-purple-100 shadow-[0_0_20px_rgba(168,85,247,0.25)]' 
+                : 'bg-slate-900/30 border-slate-800/60 text-slate-400 hover:bg-slate-800/60 hover:text-slate-200 hover:border-slate-700/80 hover:shadow-[0_0_15px_rgba(100,116,139,0.1)]'
             }`}
           >
+            {currentModel?.uid === res.uid && (
+              <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-green-500/20 border border-green-500/60 flex items-center justify-center">
+                <Check size={12} className="text-green-400" />
+              </div>
+            )}
+            
             <div className="flex justify-between items-start">
               <span className={`font-bold text-sm ${currentModel?.uid === res.uid ? 'text-purple-300' : 'text-slate-300 group-hover:text-slate-100'}`}>
                 {res.source}
               </span>
               {res.score && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700">
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                  currentModel?.uid === res.uid
+                    ? 'bg-purple-700/50 text-purple-200 border border-purple-600/50'
+                    : 'bg-slate-800/60 text-slate-400 border border-slate-700'
+                }`}>
                   {res.score}%
                 </span>
               )}
             </div>
+            
+            {(res.thumbnails?.[0]?.url || res.image_url) && (
+              <div className="relative overflow-hidden rounded-lg h-24 bg-slate-800/50 border border-slate-700/50 mb-1">
+                <img
+                  src={res.thumbnails?.[0]?.url || res.image_url}
+                  alt={res.title}
+                  className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/40 via-transparent to-transparent" />
+              </div>
+            )}
+            
             <span className="text-xs opacity-80 truncate line-clamp-1 italic">{res.title || 'Procedural Model'}</span>
 
             {Array.isArray(res.model_labels) && res.model_labels.length > 0 && (

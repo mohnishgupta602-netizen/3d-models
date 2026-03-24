@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import SearchBar from './components/SearchBar';
 import ThreeCanvas from './components/ThreeCanvas';
 import ModelSelection from './components/ModelSelection';
 import AIChatbot from './components/AIChatbot';
-import { Layers } from 'lucide-react';
+import ReviewPanel from './components/ReviewPanel';
+import { Layers, Square, Volume2 } from 'lucide-react';
 
 function App() {
   const [isLoading, setIsLoading] = useState(false);
@@ -11,12 +12,66 @@ function App() {
   const [explodedValue, setExplodedValue] = useState(0);
   const [error, setError] = useState(null);
   const [resultsList, setResultsList] = useState([]);
+  const [activeQuery, setActiveQuery] = useState('');
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [rightPanelTab, setRightPanelTab] = useState('reviews');
+
+  useEffect(() => {
+    return () => {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const narrationText = useMemo(() => {
+    if (!modelData) return '';
+
+    const overview = (modelData.ai_overview || '').trim();
+    if (overview) {
+      return overview;
+    }
+
+    const topic = (activeQuery || modelData.title || 'this concept').trim();
+    return `You searched for ${topic}. This is a 3D representation of ${topic} to help you understand the concept in a simple visual way.`;
+  }, [modelData, activeQuery]);
+
+  const stopNarration = () => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    setIsSpeaking(false);
+  };
+
+  const playEnglishNarration = () => {
+    if (!narrationText || !('speechSynthesis' in window)) return;
+
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(narrationText);
+    utterance.lang = 'en-US';
+    utterance.rate = 1;
+    utterance.pitch = 1;
+
+    const voices = window.speechSynthesis.getVoices();
+    const englishVoice = voices.find((voice) => voice.lang && voice.lang.toLowerCase().startsWith('en'));
+    if (englishVoice) utterance.voice = englishVoice;
+
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    setIsSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+  };
 
   const handleSearch = async (query) => {
+    const cleanedQuery = (query || '').trim();
     setIsLoading(true);
     setError(null);
     setExplodedValue(0);
     setResultsList([]);
+    setActiveQuery(cleanedQuery);
+    stopNarration();
     
     try {
       // Parallel intent and search calls
@@ -101,7 +156,10 @@ function App() {
               <ModelSelection 
                 results={resultsList} 
                 currentModel={modelData} 
-                onSelect={(m) => setModelData(m)} 
+                onSelect={(m) => {
+                  stopNarration();
+                  setModelData(m);
+                }} 
               />
             </div>
 
@@ -116,9 +174,80 @@ function App() {
               </div>
             </div>
 
-            {/* Right Sidebar: AI Chatbot */}
-            <div className="lg:col-span-1 h-full overflow-hidden">
-              <AIChatbot />
+            {/* Right Sidebar: Reviews & Chat */}
+            <div className="lg:col-span-1 h-full overflow-hidden flex flex-col gap-4">
+              <div className="bg-slate-900/50 border border-slate-800/50 rounded-2xl p-4 shadow-xl backdrop-blur-sm">
+                <div className="flex items-center gap-2 mb-3 text-slate-100 font-semibold">
+                  <Volume2 size={18} className="text-blue-400" />
+                  <h3 className="text-sm">English Audio Description</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={playEnglishNarration}
+                    disabled={!narrationText}
+                    className="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+                  >
+                    <Volume2 size={15} />
+                    {isSpeaking ? 'Replay' : 'Listen'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={stopNarration}
+                    disabled={!isSpeaking}
+                    className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-100 text-sm font-medium transition-colors"
+                  >
+                    <Square size={14} />
+                    Stop
+                  </button>
+                </div>
+              </div>
+
+              {/* Tabs */}
+              <div className="flex items-center gap-1 border-b border-slate-800/50 bg-slate-950/20 rounded-t-lg px-1">
+                <button
+                  onClick={() => setRightPanelTab('reviews')}
+                  className={`relative px-4 py-2.5 text-xs font-semibold transition-all duration-300 ${
+                    rightPanelTab === 'reviews'
+                      ? 'text-blue-300'
+                      : 'text-slate-400 hover:text-slate-300'
+                  }`}
+                >
+                  Reviews
+                  {rightPanelTab === 'reviews' && (
+                    <span className="absolute bottom-0 left-2 right-2 h-0.5 bg-gradient-to-r from-blue-500 to-blue-400 rounded-t transition-all duration-300" />
+                  )}
+                </button>
+                <button
+                  onClick={() => setRightPanelTab('chat')}
+                  className={`relative px-4 py-2.5 text-xs font-semibold transition-all duration-300 ${
+                    rightPanelTab === 'chat'
+                      ? 'text-blue-300'
+                      : 'text-slate-400 hover:text-slate-300'
+                  }`}
+                >
+                  Chat
+                  {rightPanelTab === 'chat' && (
+                    <span className="absolute bottom-0 left-2 right-2 h-0.5 bg-gradient-to-r from-blue-500 to-blue-400 rounded-t transition-all duration-300" />
+                  )}
+                </button>
+              </div>
+
+              {/* Tab Content with smooth transition */}
+              <div className="flex-1 min-h-0 overflow-hidden relative">
+                <div
+                  className="absolute inset-0 transition-opacity duration-300 ease-in-out"
+                  style={{ opacity: rightPanelTab === 'reviews' ? 1 : 0, pointerEvents: rightPanelTab === 'reviews' ? 'auto' : 'none' }}
+                >
+                  <ReviewPanel modelId={modelData?.uid} modelTitle={modelData?.title} />
+                </div>
+                <div
+                  className="absolute inset-0 transition-opacity duration-300 ease-in-out"
+                  style={{ opacity: rightPanelTab === 'chat' ? 1 : 0, pointerEvents: rightPanelTab === 'chat' ? 'auto' : 'none' }}
+                >
+                  <AIChatbot />
+                </div>
+              </div>
             </div>
           </div>
         )}

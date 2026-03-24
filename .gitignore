@@ -1,27 +1,15 @@
-# Environments
-.env
-.venv/
-env/
-venv/
-ENV/
-
-# Dependencies
 node_modules/
-dist/
-dist-ssr/
-*.local
-
-# Python
+venv/
+.venv/
 __pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-
-# IDEs
-.vscode/
-.idea/
-
-# OS
+*.pyc
+.env
+.env.*
+dist/
+build/
+backend/chroma_db/
+backend/chroma_db_final/
+backend/chroma_db_v2/
+backend/chroma_db_v3/
+backend/reviews.db
 .DS_Store
-Thumbs.db

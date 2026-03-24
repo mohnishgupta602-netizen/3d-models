@@ -4,10 +4,17 @@ import json
 import concurrent.futures
 import os
 import re
+import math
+import base64
 from cache import QueryCache
 from fallback import build_fallback_payload
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
 
-CACHE_VERSION = "v28"
+CACHE_VERSION = "v34"
 HIGH_SIMILARITY_THRESHOLD = 85
 
 class ModelSearchEngine:
@@ -17,12 +24,238 @@ class ModelSearchEngine:
         self.tripo3d_token = os.getenv("TRIPO3D_API_KEY")
         self.backend_base_url = os.getenv("BACKEND_BASE_URL") or "http://127.0.0.1:8000"
         self.concept2_backend_url = (os.getenv("CONCEPT2D_BACKEND_URL") or "").strip().rstrip("/")
+        self.concept2_timeout_seconds = int(os.getenv("CONCEPT2_VISUALIZE_TIMEOUT_SECONDS", "60"))
         self.models_dir = os.path.join(os.path.dirname(__file__), "models")
         self.cache = QueryCache()
+        
+        # Initialize Gemini API for vision-based label positioning
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
+        if GEMINI_AVAILABLE and self.gemini_api_key:
+            genai.configure(api_key=self.gemini_api_key)
+            self.gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        else:
+            self.gemini_model = None
 
-    def _location_to_position(self, location: str, index: int, total_parts: int):
+    def _get_gemini_label_positions(self, normalized_keywords: str, part_definitions: list, model_image_base64: str = None):
+        """
+        Use Gemini vision API to analyze model image and generate precise x,y,z coordinates for labels.
+        
+        Args:
+            normalized_keywords: The concept/model name
+            part_definitions: List of parts with name and description
+            model_image_base64: Base64-encoded image of the 3D model
+        
+        Returns:
+            Updated part_definitions with refined x,y,z coordinates from Gemini vision analysis
+        """
+        if not self.gemini_model or not model_image_base64:
+            return part_definitions
+        
+        if not part_definitions:
+            return part_definitions
+        
+        try:
+            # Prepare parts list for Gemini prompt
+            parts_list = "\n".join([
+                f"- {i+1}. {p.get('name', 'Part')} (Description: {p.get('description', 'N/A')})"
+                for i, p in enumerate(part_definitions[:10])  # Limit to 10 parts
+            ])
+            
+            prompt = f"""You are analyzing a 3D model image of a '{normalized_keywords}' and need to identify the precise spatial positions of labeled parts.
+
+The following parts need to be positioned:
+{parts_list}
+
+Analyze the 3D model in the image and for each part, provide the most accurate x, y, z coordinates:
+- X-axis (left/right): -1.0 (far left) to +1.0 (far right), center at 0
+- Y-axis (up/down): -1.0 (bottom) to +1.0 (top), center at 0
+- Z-axis (front/back): -1.0 (far back) to +1.0 (far front), center at 0
+
+Return the response as valid JSON with this exact structure:
+{{
+  "coordinates": [
+    {{"name": "part name", "x": 0.0, "y": 0.0, "z": 0.0}},
+    ...
+  ]
+}}
+
+Be precise and place labels exactly where the parts are visible in the image. Consider the 3D geometry carefully."""
+            
+            # Decode image and send bytes to Gemini for vision analysis
+            image_data = base64.b64decode(model_image_base64)
+            image = {
+                "mime_type": "image/png",
+                "data": image_data,
+            }
+            
+            message = self.gemini_model.generate_content([
+                prompt,
+                image
+            ])
+            
+            response_text = message.text or ""
+            
+            # Parse JSON from response
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                json_str = response_text[json_start:json_end]
+                gemini_response = json.loads(json_str)
+                coordinates = gemini_response.get("coordinates", [])
+                
+                # Map Gemini coordinates back to part_definitions
+                coords_by_name = {c.get("name", "").lower(): c for c in coordinates}
+                
+                for part in part_definitions:
+                    part_name_lower = part.get("name", "").lower()
+                    
+                    # Try exact match first, then partial match
+                    match = coords_by_name.get(part_name_lower)
+                    if not match:
+                        for coord in coordinates:
+                            if part_name_lower in coord.get("name", "").lower():
+                                match = coord
+                                break
+                    
+                    if match:
+                        # Clamp values to valid range
+                        x = max(-0.5, min(0.5, float(match.get("x", 0))))
+                        y = max(-0.5, min(0.5, float(match.get("y", 0))))
+                        z = max(-0.3, min(0.3, float(match.get("z", 0))))
+                        
+                        part["position"] = {
+                            "x": round(x, 3),
+                            "y": round(y, 3),
+                            "z": round(z, 3)
+                        }
+                
+                return part_definitions
+        
+        except Exception as e:
+            print(f"Gemini vision positioning failed: {e}")
+            return part_definitions
+        
+        return part_definitions
+
+    def _semantic_anchor(self, text: str):
+        value = (text or "").lower()
+
+        x = None
+        y = None
+        z = None
+
+        if any(k in value for k in ["left", "lobe", "wing left", "arm left", "leg left"]):
+            x = -0.38
+        elif any(k in value for k in ["right", "wing right", "arm right", "leg right"]):
+            x = 0.38
+
+        if any(k in value for k in ["top", "upper", "head", "aorta", "artery", "dome", "roof", "crown", "neck", "stem"]):
+            y = 0.48
+        elif any(k in value for k in ["bottom", "lower", "base", "leg", "foot", "wheel", "stand", "foundation", "support"]):
+            y = -0.38
+
+        if any(k in value for k in ["front", "face", "mouth", "nose", "drawer", "panel", "door"]):
+            z = 0.28
+        elif any(k in value for k in ["back", "rear", "tail", "spine"]):
+            z = -0.28
+
+        return x, y, z
+
+    def _dynamic_part_definitions(self, normalized_keywords: str, intent_data: dict | None = None, model: dict | None = None, max_parts: int = 8):
+        # Build labels from prompt intent + current model metadata (no concept-specific hardcoding).
+        candidates = []
+
+        if isinstance(intent_data, dict):
+            for token in intent_data.get("structural_components", []) or []:
+                if isinstance(token, str):
+                    value = token.strip().lower()
+                    if value:
+                        candidates.append(value)
+
+        metadata_blob = ""
+        if isinstance(model, dict):
+            metadata_blob = " ".join(
+                [
+                    model.get("title") or "",
+                    model.get("name") or "",
+                    model.get("explanation") or "",
+                    model.get("description") or "",
+                ]
+            )
+
+        token_blob = f"{normalized_keywords or ''} {metadata_blob}".lower()
+        extracted = re.findall(r"[a-z0-9]+", token_blob)
+        stop = {
+            "the", "and", "for", "with", "from", "this", "that", "model", "scene", "object",
+            "asset", "match", "high", "strong", "top", "test", "labeling", "labels", "original",
+            "concept", "using", "source", "generated", "retrieved",
+        }
+        for token in extracted:
+            if len(token) < 3 or token in stop:
+                continue
+            candidates.append(token)
+
+        deduped = []
+        seen = set()
+        for token in candidates:
+            t = token.strip().lower()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            deduped.append(t)
+
+        if not deduped:
+            words = [w for w in re.findall(r"[a-z0-9]+", (normalized_keywords or "").lower()) if len(w) >= 3]
+            deduped = words or ["part", "core", "feature"]
+
+        selected = deduped[:max_parts]
+        total = max(1, len(selected))
+        radius = 0.32 if total > 1 else 0.0
+
+        parts = []
+        for idx, token in enumerate(selected):
+            angle = (2 * math.pi * idx) / total if total > 1 else 0.0
+            x = math.cos(angle) * radius
+            y = 0.12 + (0.06 if idx % 2 == 0 else -0.06)
+            z = math.sin(angle) * radius * 0.48
+
+            sx, sy, sz = self._semantic_anchor(token)
+            if sx is not None:
+                x = sx
+            if sy is not None:
+                y = sy
+            if sz is not None:
+                z = sz
+
+            # tiny deterministic spread to avoid full overlap when multiple labels infer same anchor
+            spread = ((idx % 3) - 1) * 0.03
+            x += spread
+
+            x = round(x, 3)
+            y = round(y, 3)
+            z = round(z, 3)
+
+            primitive = "sphere"
+            if any(k in token for k in ["tube", "pipe", "aorta", "artery", "vein", "stem"]):
+                primitive = "cylinder"
+            elif any(k in token for k in ["base", "core", "block", "body"]):
+                primitive = "cube"
+
+            parts.append(
+                {
+                    "name": token,
+                    "primitive": primitive,
+                    "description": f"Detected semantic part: {token}.",
+                    "position": {"x": x, "y": y, "z": z},
+                    "parameters": {},
+                }
+            )
+
+        return parts
+
+    def _location_to_position(self, location: str, index: int, total_parts: int, part_name: str = ""):
         location_text = (location or "").lower()
-        spacing = 1.2
+        spacing = 0.35
         center_offset = (total_parts - 1) / 2.0
         default_x = (index - center_offset) * spacing
         x = default_x
@@ -30,19 +263,27 @@ class ModelSearchEngine:
         z = 0.0
 
         if "left" in location_text:
-            x = -1.6
+            x = -0.5
         elif "right" in location_text:
-            x = 1.6
+            x = 0.5
 
         if "top" in location_text or "upper" in location_text:
-            y = 1.2
+            y = 0.45
         elif "bottom" in location_text or "lower" in location_text or "base" in location_text:
-            y = -1.2
+            y = -0.45
 
         if "front" in location_text:
-            z = 1.1
+            z = 0.35
         elif "back" in location_text or "rear" in location_text:
-            z = -1.1
+            z = -0.35
+
+        sx, sy, sz = self._semantic_anchor(f"{location_text} {part_name}")
+        if sx is not None:
+            x = sx
+        if sy is not None:
+            y = sy
+        if sz is not None:
+            z = sz
 
         return {"x": round(x, 3), "y": round(y, 3), "z": round(z, 3)}
 
@@ -82,12 +323,43 @@ class ModelSearchEngine:
                     "name": name,
                     "primitive": primitive,
                     "description": full_description,
-                    "position": self._location_to_position(location, idx, max(total, 1)),
+                    "position": self._location_to_position(location, idx, max(total, 1), part_name=name),
                     "parameters": {},
                 }
             )
 
         return converted
+
+    def _labels_need_fallback(self, normalized_keywords: str, part_definitions: list):
+        if not part_definitions:
+            return True
+
+        query_tokens = set(re.findall(r"[a-z0-9]+", (normalized_keywords or "").lower()))
+        combined = " ".join(
+            [
+                f"{p.get('name', '')} {p.get('description', '')}"
+                for p in part_definitions
+                if isinstance(p, dict)
+            ]
+        ).lower()
+
+        # If query terms barely appear in label set, labels are likely noisy.
+        token_hits = sum(1 for token in query_tokens if token and token in combined)
+        if query_tokens and token_hits == 0:
+            return True
+
+        # Guardrail for common bad anatomy fallback observed for heart concepts.
+        if "heart" in query_tokens:
+            bad_terms = {"head", "torso", "arm", "hand", "leg", "foot"}
+            names = {
+                (p.get("name") or "").strip().lower()
+                for p in part_definitions
+                if isinstance(p, dict)
+            }
+            if names.intersection(bad_terms):
+                return True
+
+        return False
 
     def _fetch_concept2_labeled_model(self, normalized_keywords: str, base_score: float = 81.0):
         if not self.concept2_backend_url:
@@ -95,8 +367,13 @@ class ModelSearchEngine:
 
         url = f"{self.concept2_backend_url}/visualize"
         try:
-            response = requests.get(url, params={"concept": normalized_keywords}, timeout=25)
+            response = requests.get(
+                url,
+                params={"concept": normalized_keywords},
+                timeout=self.concept2_timeout_seconds,
+            )
             if response.status_code != 200:
+                print(f"Concept-2-3D visualize returned status={response.status_code} for '{normalized_keywords}'")
                 return None
 
             payload_raw = response.json()
@@ -113,6 +390,15 @@ class ModelSearchEngine:
                 labels_payload = model_data.get("part_labels") if isinstance(model_data.get("part_labels"), dict) else {}
 
             part_definitions = self._convert_external_part_labels(labels_payload)
+            if self._labels_need_fallback(normalized_keywords, part_definitions):
+                part_definitions = self._dynamic_part_definitions(
+                    normalized_keywords,
+                    intent_data=None,
+                    model={
+                        "title": metadata.get("name") or model_data.get("name") or normalized_keywords,
+                        "description": metadata.get("description") or model_data.get("description") or "",
+                    },
+                )
             title = (
                 (metadata.get("name") if isinstance(metadata, dict) else None)
                 or model_data.get("name")
@@ -125,7 +411,7 @@ class ModelSearchEngine:
             )
 
             return {
-                "source": "Original 3D Labeling Test",
+                "source": "Original 3D Labeling Test (Concept-2-3D)",
                 "title": f"Original + Labels: {title}",
                 "uid": f"original-labeled-{normalized_keywords.replace(' ', '-')}",
                 "thumbnails": [],
@@ -135,12 +421,9 @@ class ModelSearchEngine:
                 "explanation": description,
                 "labeling_mode": "original-3d-test",
                 "labeling_preview_note": "Labels imported from Concept-2-3D pipeline output.",
+                "labeling_pipeline": "concept-2-3d",
                 "built_in_annotations": [],
                 "built_in_annotations_count": len(part_definitions),
-                "procedural_data": {
-                    "components": [pd.get("primitive", "sphere") for pd in part_definitions],
-                    "parts": part_definitions,
-                },
                 "part_definitions": part_definitions,
                 "geometry_details": {
                     "concept": normalized_keywords,
@@ -148,7 +431,8 @@ class ModelSearchEngine:
                     "shapes": part_definitions,
                 },
             }
-        except Exception:
+        except Exception as e:
+            print(f"Concept-2-3D bridge failed for '{normalized_keywords}': {e}")
             return None
 
     def _build_similarity_labels(self, model: dict):
@@ -179,6 +463,34 @@ class ModelSearchEngine:
             "threshold": HIGH_SIMILARITY_THRESHOLD,
             "labels": labels,
         }
+
+    def _attach_semantic_labels(self, model: dict, normalized_keywords: str, intent_data: dict | None = None):
+        if not isinstance(model, dict):
+            return
+
+        existing_parts = model.get("part_definitions")
+        if not isinstance(existing_parts, list) or not existing_parts:
+            semantic_parts = self._dynamic_part_definitions(
+                normalized_keywords,
+                intent_data=intent_data,
+                model=model,
+            )
+            if semantic_parts:
+                model["part_definitions"] = semantic_parts
+
+        if isinstance(model.get("part_definitions"), list) and model.get("part_definitions"):
+            if not isinstance(model.get("geometry_details"), dict):
+                model["geometry_details"] = {
+                    "concept": normalized_keywords,
+                    "total_parts": len(model["part_definitions"]),
+                    "shapes": model["part_definitions"],
+                }
+
+            if model.get("built_in_annotations_count") is None:
+                model["built_in_annotations_count"] = len(model["part_definitions"])
+
+            if model.get("model_url") or model.get("embed_url"):
+                model.setdefault("labeling_mode", "semantic-overlay")
 
     def _score_tier(self, score: float):
         if score >= 95:
@@ -342,30 +654,20 @@ class ModelSearchEngine:
             },
         }
 
-    def _build_original_labeled_test_card(self, normalized_keywords: str, base_model: dict, base_score: float = 81.0):
+    def _build_original_labeled_test_card(self, normalized_keywords: str, base_model: dict, base_score: float = 81.0, intent_data: dict | None = None):
         external_card = self._fetch_concept2_labeled_model(normalized_keywords, base_score=base_score)
         if external_card:
             return external_card
-
-        fallback_payload = build_fallback_payload(normalized_keywords)
-        geometry_details = (fallback_payload or {}).get("geometry_details") or {}
-        parts = geometry_details.get("shapes") or []
 
         sketchfab_annotations = []
         if (base_model.get("source") or "").lower() == "sketchfab":
             sketchfab_annotations = self._fetch_sketchfab_annotations(base_model.get("uid"))
 
-        part_definitions = [
-            {
-                "name": p.get("name") or f"part_{idx + 1}",
-                "primitive": p.get("primitive") or "cube",
-                "description": p.get("description") or f"Label part {idx + 1}",
-                "position": p.get("position") or {"x": 0.0, "y": 0.0, "z": 0.0},
-                "parameters": p.get("parameters") or {},
-            }
-            for idx, p in enumerate(parts)
-            if isinstance(p, dict)
-        ]
+        part_definitions = self._dynamic_part_definitions(
+            normalized_keywords,
+            intent_data=intent_data,
+            model=base_model,
+        )
 
         title = (base_model.get("title") or normalized_keywords.title()).strip()
         return {
@@ -378,13 +680,10 @@ class ModelSearchEngine:
             "score": float(base_score),
             "explanation": f"Original 3D model with test labels inferred from '{normalized_keywords}'.",
             "labeling_mode": "original-3d-test",
-            "labeling_preview_note": "Proxy label view is used when source model is embedded.",
+            "labeling_preview_note": "Concept-2-3D output unavailable for this query; using local embedded proxy.",
+            "labeling_pipeline": "local-fallback",
             "built_in_annotations": sketchfab_annotations,
             "built_in_annotations_count": len(sketchfab_annotations),
-            "procedural_data": {
-                "components": [pd.get("primitive", "cube") for pd in part_definitions],
-                "parts": part_definitions,
-            },
             "part_definitions": part_definitions,
             "geometry_details": {
                 "concept": normalized_keywords,
@@ -515,6 +814,7 @@ class ModelSearchEngine:
                         normalized_keywords,
                         primary_retrieved,
                         base_score=original_test_score,
+                        intent_data=intent_data,
                     )
                 )
 
